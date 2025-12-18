@@ -35,7 +35,7 @@ MSE: multiscale entropy
 
 Band cross PSD: PSD with cross-spectral desnities (across channels)
 
-FOOOF: One-over-f parsing of the power spectrum plus up to 3 peaks on top.
+FOOOF: One-over-f parsing of the power spectrum (slope and intercept) plus up to 3 peaks on top.
 
 ## Credits
 
