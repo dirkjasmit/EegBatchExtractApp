@@ -31,7 +31,8 @@ FOOOF: One-over-f parsing of the power spectrum plus up to 3 peaks on top.
 
 ### EegBatchExtractApp copyright
 
-(C) Dirk Smit and Danae Mitsea except functions credited below.
+All main application code and helper functions except functions credited below: (C) Dirk Smit and Danae Mitsea 
+All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -60,7 +61,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### UIPICKFILE
 
-Copyright (c) 2007, Douglas M. Schwarz
+uipickfile.m is Copyright (c) 2007, Douglas M. Schwarz
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
