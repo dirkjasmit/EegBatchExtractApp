@@ -16,7 +16,9 @@ The program will tell you where the data were stored. There will always be the g
 
 ### description of the analyses
 DFA = detrended fluctutaion analysis: <requires filter selection> First filter in the freqency band then extract the decay exponent in long range temporal correlations (Linkenkaer-Hansen 2001).
+
 IAF = Individual Alpha Frequency: prompts for a frequency window and determines the IAF
+
 Coherence: Calculates coherence spectra and stroes in gloabl variable MeanCOH
 Power: <requires filter selection> calculates power in the selected frequency band
 PSD: Prompts for lower and upper frequency limits, and calculates power spectral desnity in microV^2/Hz with hanning windows of 4 sec epochs, data summed into 1 Hz bins.
