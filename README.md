@@ -20,13 +20,21 @@ DFA = detrended fluctutaion analysis: <requires filter selection> First filter i
 IAF = Individual Alpha Frequency: prompts for a frequency window and determines the IAF
 
 Coherence: Calculates coherence spectra and stroes in gloabl variable MeanCOH
+
 Power: <requires filter selection> calculates power in the selected frequency band
+
 PSD: Prompts for lower and upper frequency limits, and calculates power spectral desnity in microV^2/Hz with hanning windows of 4 sec epochs, data summed into 1 Hz bins.
+
 FAA: frontal alpha asymmetry
+
 ERP/ERSP: prompts for event codes / settings and calculates ERP/ERSP
+
 Review: loops thru the files and opens a reviewing window. Saves the data as <path>/Rev_<filename>
-MSE: multiscale entroy
+
+MSE: multiscale entropy
+
 Band cross PSD: PSD with cross-spectral desnities (across channels)
+
 FOOOF: One-over-f parsing of the power spectrum plus up to 3 peaks on top.
 
 ## Credits
