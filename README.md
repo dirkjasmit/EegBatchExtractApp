@@ -71,7 +71,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### UIPICKFILE
 
-uipickfile.m is Copyright (c) 2007, Douglas M. Schwarz
+uipickfiles.m is Copyright (c) 2007, Douglas M. Schwarz
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
