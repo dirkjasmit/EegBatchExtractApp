@@ -5,14 +5,14 @@ Extract EEG parameters from cleaned EEG files (or review data in a loop)
 ## Steps for running EegBatchExtractApp
 
 ### buttons and main screen settings
-1. Use the 'Impute/Select' button to selcct an EEG file with a full EEG channel set. This removes unwanted (non-EEG) channels.
+1. Use the 'Impute/Select' button to select an EEG file with a full EEG channel set. This indicates which channels are to be retained and optionally to be imputed.
 2. Select the checkbox if missing channels are to be imputed. There is a choice for channel signal interpolation or to impute the missing data statistically AFTER running the feature extraction.
-3. Select the files to be analyzed.
-4. Select he analysis to be performed (see below). For some analyses, also set the frequency to be analyzed.
-5. select analysis/calculation options
-6. run by pressing 'Batch'
+3. Select the files to be analyzed (top button).
+4. Select he analysis to be performed (see below). For some analyses, also set the frequency to be analyzed. This settings is required for DFA, Power, and FAA. For other analyses a popup will appear.
+5. Select analysis/calculation options
+6. Run all files consecutively by pressing 'Batch'
 
-The program will tell you where the data were stored. There will always be the global variable ResultTable with the filenames. Pathnames will have been removed.
+The program will tell you where the data were stored. There will always be the global variable ResultTable with the filenames. For DFA, Power and FAA there will also be columns with the extracted parameters in the ResultTable variable. For other analyses, there will be no 
 
 ### description of the analyses
 DFA = detrended fluctutaion analysis: <requires filter selection> First filter in the freqency band then extract the decay exponent in long range temporal correlations (Linkenkaer-Hansen 2001).
@@ -25,7 +25,7 @@ Power: <requires filter selection> calculates power in the selected frequency ba
 
 PSD: Prompts for lower and upper frequency limits, and calculates power spectral desnity in microV^2/Hz with hanning windows of 4 sec epochs, data summed into 1 Hz bins.
 
-FAA: frontal alpha asymmetry
+FAA: <requires filter selection> frontal alpha asymmetry
 
 ERP/ERSP: prompts for event codes / settings and calculates ERP/ERSP
 
