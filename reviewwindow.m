@@ -14,8 +14,9 @@ function EEG_out = reviewwindow(EEG)
 %   Shift-Click in signal area : mark period [marker … click] as bad (orange overlay)
 %
 % Keyboard
-%   ← / → arrow keys : scroll one window
-%   ↑ / ↓ arrow keys : decrease / increase scale
+%   ← / → arrow keys   : scroll one window
+%   ↑ / ↓ arrow keys   : decrease / increase scale
+%   Page Up / Page Down : scroll one channel page (EEG mode)
 %
 % Buttons
 %   ◀ Prev / Next ▶   : scroll through time
@@ -52,6 +53,10 @@ s.topo_axes   = gobjects(1, 0);  % topoplot axes handles (ICA mode)
 s.psd_axes    = gobjects(1, 0);  % PSD axes handles (ICA mode)
 s.topo_N      = 0;               % N when topo axes were last built
 s.out_EEG     = [];              % set by reject_cb; read after uiwait
+s.interp_EEG  = [];             % cached result of InterpolationCleaning(EEG)
+s.show_interp = false;          % whether to display interpolation-cleaned data
+s.chan_offset = 0;              % first visible channel index (0-based, EEG mode)
+s.chan_page   = 33;             % channels per page
 
 %% ---------- figure -------------------------------------------------------
 scr = get(0, 'ScreenSize');
@@ -111,6 +116,27 @@ hax_ch = axes('Parent', hfig, ...
     'HitTest',  'on');
 hold(hax_ch, 'on');
 
+%% ---------- channel-page nav (bottom-left, under channel strip) ----------
+% Stacked in the left column of the button bar:  ▼ (bottom) | ▲ (middle) | label (top)
+bh_nav = 0.022;
+bw_nav = CHAN_W - M*2;   % 0.069
+by_nav = 0.012;          % same baseline as other buttons
+hchan_dn = uicontrol('Style','pushbutton','String','▼', ...
+    'Units','normalized', ...
+    'Position',[M, by_nav, bw_nav, bh_nav], ...
+    'FontSize',8,'TooltipString','Next channels (Page Down)', ...
+    'Callback',@(~,~)chan_page_cb(+1));
+hchan_up = uicontrol('Style','pushbutton','String','▲', ...
+    'Units','normalized', ...
+    'Position',[M, by_nav + bh_nav + 0.002, bw_nav, bh_nav], ...
+    'FontSize',8,'TooltipString','Previous channels (Page Up)', ...
+    'Callback',@(~,~)chan_page_cb(-1));
+hchan_lbl = uicontrol('Style','text','String','', ...
+    'Units','normalized', ...
+    'Position',[M, by_nav + 2*bh_nav + 0.006, bw_nav, 0.016], ...
+    'BackgroundColor',[1 1 1],'ForegroundColor',[0.25 0.25 0.25], ...
+    'FontSize',7,'HorizontalAlignment','center');
+
 %% ---------- bottom buttons -----------------------------------------------
 bw = 0.08; bh = 0.048; by = 0.012; gap = 0.006;
 bx = ax_l;
@@ -141,10 +167,15 @@ hscale_lbl = uicontrol('Style','text','String','±50 µV', ...
     'FontSize',9,'FontWeight','bold','HorizontalAlignment','center');
 
 bx = bx + bw + gap*4;
+hrun_ica = uicontrol('Style','pushbutton','String','ICA starting…', ...
+    'Units','normalized','Position',[bx by bw bh], ...
+    'BackgroundColor',[0.13 0.38 0.68],'ForegroundColor','w', ...
+    'FontWeight','bold','FontSize',10,'Enable','off','Callback',@run_ica_cb);
+
+bx = bx + bw + gap;
 htoggle = uicontrol('Style','pushbutton','String','Show ICA', ...
     'Units','normalized','Position',[bx by bw bh], ...
-    'FontSize',9,'Callback',@toggle_cb);
-if ~has_ica, set(htoggle,'Enable','off','String','No ICA'); end
+    'FontSize',9,'Enable','off','Callback',@toggle_cb);
 
 bx = bx + bw + gap*4;
 uicontrol('Style','pushbutton','String','REJECT', ...
@@ -158,10 +189,11 @@ uicontrol('Style','pushbutton','String','Cancel', ...
     'FontSize',10,'Callback',@close_req_cb);
 
 bx = bx + bw + gap*4;
-hrun_ica = uicontrol('Style','pushbutton','String','Run ICA', ...
-    'Units','normalized','Position',[bx by bw bh], ...
-    'BackgroundColor',[0.13 0.38 0.68],'ForegroundColor','w', ...
-    'FontWeight','bold','FontSize',10,'Callback',@run_ica_cb);
+hinterp_cb = uicontrol('Style','checkbox','String','Interp. Cleaning', ...
+    'Units','normalized','Position',[bx by bw*1.6 bh], ...
+    'FontSize',9,'Value',0,'BackgroundColor',[1 1 1], ...
+    'TooltipString','Run InterpolationCleaning and overlay result', ...
+    'Callback',@interp_clean_cb);
 
 %% ---------- store handles and draw ---------------------------------------
 s.hfig       = hfig;
@@ -169,12 +201,26 @@ s.hax        = hax;
 s.hax_ch     = hax_ch;
 s.htoggle    = htoggle;
 s.hscale_lbl = hscale_lbl;
+s.hinterp_cb = hinterp_cb;
+s.hchan_up   = hchan_up;
+s.hchan_dn   = hchan_dn;
+s.hchan_lbl  = hchan_lbl;
 
 setappdata(hfig, 's', s);
 redraw();
 
+%% --- auto-start ICA in background (timer fires after window renders) ----
+ica_auto_t = timer('StartDelay',0.4, 'ExecutionMode','singleShot', ...
+    'TimerFcn', @(~,~) run_ica_cb([],[]), ...
+    'Tag',      'reviewwindow_ica_auto');
+start(ica_auto_t);
+
 %% --- block here until REJECT or window close ----------------------------
 uiwait(hfig);
+
+% Clean up auto-ICA timer if still pending (e.g. window closed very fast)
+t = timerfind('Tag','reviewwindow_ica_auto');
+if ~isempty(t), stop(t); delete(t); end
 
 if ishandle(hfig)
     s       = getappdata(hfig, 's');
@@ -191,13 +237,18 @@ function redraw()
     EEG = s.EEG;
 
     %% pick data & labels
+    orig_data = double(EEG.data);   % always keep original for overlay
     if strcmp(s.mode, 'ica')
         data    = double(EEG.icaact);
         N       = min(size(data, 1), 24);   % show top 24 ICs only
         labels  = arrayfun(@(k)sprintf('IC%d',k), 1:N, 'UniformOutput',false);
         bad_arr = s.bad_ics;
     else
-        data = double(EEG.data);
+        if s.show_interp && isstruct(s.interp_EEG) && isfield(s.interp_EEG, 'data')
+            data = double(s.interp_EEG.data);
+        else
+            data = double(EEG.data);
+        end
         N    = size(data, 1);
         if isfield(EEG,'chanlocs') && numel(EEG.chanlocs) >= N
             labels = {EEG.chanlocs(1:N).labels};
@@ -207,8 +258,40 @@ function redraw()
         bad_arr = s.bad_chans;
     end
 
-    if numel(bad_arr) < N
-        bad_arr(end+1:N) = false;
+    %% channel paging (EEG mode only; ICA stays at 24-cap)
+    N_total = size(data, 1);
+    if strcmp(s.mode,'eeg')
+        if numel(bad_arr) < N_total
+            bad_arr(end+1:N_total) = false;
+        end
+        s.chan_offset = max(0, min(s.chan_offset, N_total - 1));
+        vis_idx   = s.chan_offset + 1 : min(s.chan_offset + s.chan_page, N_total);
+        data      = data(vis_idx, :);
+        orig_data = orig_data(vis_idx, :);
+        labels    = labels(vis_idx);
+        bad_arr   = bad_arr(vis_idx);
+        N         = numel(vis_idx);
+        % Update nav controls
+        if s.chan_offset > 0
+            set(s.hchan_up, 'Enable','on');
+        else
+            set(s.hchan_up, 'Enable','off');
+        end
+        if vis_idx(end) < N_total
+            set(s.hchan_dn, 'Enable','on');
+        else
+            set(s.hchan_dn, 'Enable','off');
+        end
+        set(s.hchan_lbl, 'String', sprintf('%d–%d / %d', vis_idx(1), vis_idx(end), N_total));
+    else
+        % ICA mode: all ICs visible (already capped at 24), no paging
+        vis_idx = 1:N;
+        if numel(bad_arr) < N
+            bad_arr(end+1:N) = false;
+        end
+        set(s.hchan_up,  'Enable','off');
+        set(s.hchan_dn,  'Enable','off');
+        set(s.hchan_lbl, 'String', sprintf('ICA  %d', N));
     end
 
     %% clamp window
@@ -280,6 +363,9 @@ function redraw()
             'HitTest','off');
     end
 
+    %% interpolation overlay flag (checkbox checked and result cached)
+    show_interp_overlay = strcmp(s.mode,'eeg') && s.show_interp && isstruct(s.interp_EEG) && isfield(s.interp_EEG, 'data');
+
     %% precompute IC-cleaned signal for EEG display (if any ICs marked bad)
     show_cleaned = strcmp(s.mode,'eeg') && any(s.bad_ics) && ...
                    isfield(EEG,'icawinv') && ~isempty(EEG.icawinv) && ...
@@ -291,6 +377,7 @@ function redraw()
             cleaned_data(EEG.icachansind, :) = ...
                 EEG.data(EEG.icachansind, :) - ...
                 EEG.icawinv(:, bad_ic_idx) * EEG.icaact(bad_ic_idx, :);
+            cleaned_data = cleaned_data(vis_idx, :);   % align to visible page
         catch err
             fprintf('[reviewwindow] cleaned_data error: %s\n', err.message);
             show_cleaned = false;
@@ -300,7 +387,7 @@ function redraw()
     %% traces + channel labels
     col_good  = [0   0   0  ];   % black
     col_bad   = [0.85 0.10 0.10]; % red
-    col_orig  = [0.45 0.65 0.88]; % light blue for original signal when ICs removed
+    col_orig  = [0.72 0.72 0.72]; % grey: original signal shown behind cleaned overlay
     col_zero  = [0.86 0.86 0.86]; % subtle gridline per channel
     col_ch_bg = [1.00 1.00 0.93];
 
@@ -317,15 +404,22 @@ function redraw()
             'Color', col_zero, 'LineWidth', 0.4, 'HitTest','off');
 
         % trace
-        if show_cleaned
-            % original signal in light grey behind
+        if show_interp_overlay
+            % original in grey behind, interpolated on top
+            seg_orig_i = orig_data(i, i1:i2);
+            seg_orig_i = max(min(seg_orig_i, 3*sc), -3*sc);
+            plot(s.hax, tvec, seg_orig_i + y0, ...
+                'Color', col_orig, 'LineWidth', 0.8, 'HitTest','off');
             plot(s.hax, tvec, seg + y0, ...
-                'Color', col_orig, 'LineWidth', 0.5, 'HitTest','off');
-            % IC-cleaned signal in foreground
+                'Color', c, 'LineWidth', 0.9, 'HitTest','off');
+        elseif show_cleaned
+            % original in grey behind, IC-cleaned on top
+            plot(s.hax, tvec, seg + y0, ...
+                'Color', col_orig, 'LineWidth', 0.8, 'HitTest','off');
             seg_cl = double(cleaned_data(i, i1:i2));
             seg_cl = max(min(seg_cl, 3*sc), -3*sc);
             plot(s.hax, tvec, seg_cl + y0, ...
-                'Color', c, 'LineWidth', 0.6, 'HitTest','off');
+                'Color', c, 'LineWidth', 0.9, 'HitTest','off');
         else
             plot(s.hax, tvec, seg + y0, ...
                 'Color', c, 'LineWidth', 0.5, 'HitTest','off');
@@ -403,7 +497,8 @@ function redraw()
 
                 if has_chanlocs && i <= size(EEG.icawinv, 2)
                     try
-                        topoplot(EEG.icawinv(:,i), EEG.chanlocs, ...
+                        ica_locs = EEG.chanlocs(EEG.icachansind);
+                        topoplot(EEG.icawinv(:,i), ica_locs, ...
                             'style','map','electrodes','off', ...
                             'shading','interp','whitebk','on');
                     catch
@@ -490,6 +585,22 @@ function redraw()
         end
     end
 
+    %% ---- Run ICA / Update ICA button state ---------------------------------
+    % Button is orange "Update ICA" when a decomposition exists AND bad
+    % channels or bad periods have been marked (warm start is worthwhile).
+    % Only change label while the button is enabled (not while ICA is running).
+    if strcmp(get(hrun_ica,'Enable'),'on')
+        has_decomp = isfield(s.EEG,'icaweights') && ~isempty(s.EEG.icaweights);
+        has_marks  = any(s.bad_chans) || ~isempty(s.bad_periods);
+        if has_decomp && has_marks
+            set(hrun_ica, 'String','Update ICA', ...
+                'BackgroundColor',[0.82 0.42 0.05]);
+        else
+            set(hrun_ica, 'String','Run ICA', ...
+                'BackgroundColor',[0.13 0.38 0.68]);
+        end
+    end
+
     setappdata(hfig, 's', s);
 end % redraw
 
@@ -527,6 +638,7 @@ function toggle_cb(~,~)
         s.mode = 'eeg';
         set(s.htoggle,'String','Show ICA');
     end
+    s.chan_offset = 0;   % reset on mode switch (channel lists differ)
     setappdata(hfig,'s',s);
     redraw();
 end
@@ -534,8 +646,9 @@ end
 function chan_click_cb(~, ~, idx)
     s = getappdata(hfig,'s');
     if strcmp(s.mode,'eeg')
-        if idx <= numel(s.bad_chans)
-            s.bad_chans(idx) = ~s.bad_chans(idx);
+        abs_idx = s.chan_offset + idx;   % map page-local idx to absolute channel
+        if abs_idx <= numel(s.bad_chans)
+            s.bad_chans(abs_idx) = ~s.bad_chans(abs_idx);
         end
     else
         if idx <= numel(s.bad_ics)
@@ -605,6 +718,8 @@ function key_cb(~, evt)
         case 'rightarrow', scroll_cb(+1);
         case 'uparrow',    scale_cb(-10);
         case 'downarrow',  scale_cb(+10);
+        case 'pageup',     chan_page_cb(-1);
+        case 'pagedown',   chan_page_cb(+1);
     end
 end
 
@@ -683,8 +798,9 @@ function reject_cb(~, ~)
         s.bad_ics = false(1,0);
         set(s.htoggle,'Enable','off','String','No ICA');
     end
-    s.win_start  = 0;
-    s.click_time = NaN;
+    s.win_start   = 0;
+    s.click_time  = NaN;
+    s.chan_offset = 0;
 
     s.out_EEG = EEG;
     setappdata(hfig,'s',s);
@@ -696,41 +812,203 @@ function run_ica_cb(~, ~)
     s   = getappdata(hfig,'s');
     EEG = s.EEG;
 
+    % --- decide warm vs cold start ----------------------------------------
+    has_decomp = isfield(EEG,'icaweights') && ~isempty(EEG.icaweights);
+    has_marks  = any(s.bad_chans) || ~isempty(s.bad_periods);
+
+    if has_decomp && has_marks
+        % ================================================================
+        %  WARM START: remove bad periods, re-optimise from current W
+        % ================================================================
+        set(hrun_ica, 'Enable','off', 'String','Updating ICA…', ...
+            'BackgroundColor',[0.82 0.42 0.05]);
+        drawnow;
+
+        % Build a temporary EEG: remove bad periods AND bad channels.
+        % Bad channels are excluded so they don't pollute the decomposition.
+        EEG_tmp   = EEG;
+        good_ch   = find(~s.bad_chans);   % original channel indices to keep
+        bad_ch    = find(s.bad_chans);
+
+        if ~isempty(s.bad_periods)
+            try
+                EEG_tmp = eeg_eegrej(EEG_tmp, s.bad_periods);
+            catch e_rej
+                fprintf('[reviewwindow] eeg_eegrej in warm start: %s\n', e_rej.message);
+            end
+        end
+        if ~isempty(bad_ch)
+            try
+                EEG_tmp = pop_select(EEG_tmp, 'nochannel', bad_ch);
+                fprintf('[reviewwindow] Excluded %d bad channel(s) from ICA.\n', numel(bad_ch));
+            catch e_sel
+                fprintf('[reviewwindow] pop_select in warm start: %s\n', e_sel.message);
+                good_ch = 1:size(EEG.data,1);   % fallback: keep all
+            end
+        end
+
+        % Slice w0 columns to match the channels remaining in EEG_tmp.
+        % icachansind maps ICA channels → original data channels.
+        w0           = EEG.icaweights * EEG.icasphere;  % n_ics × n_icachans
+        keep_in_ica  = ~ismember(EEG.icachansind, bad_ch);
+        w0           = w0(:, keep_in_ica);               % drop bad-channel columns
+
+        % PCA component count based on remaining channels
+        n_ch_tmp = size(EEG_tmp.data, 1);
+        if n_ch_tmp > 40
+            n_pca_ws = 40 + round(sqrt(n_ch_tmp - 40));
+            pca_ws   = {'pca', n_pca_ws};
+        else
+            pca_ws   = {};
+        end
+
+        new_EEG = [];
+        method  = '';
+
+        try
+            fprintf('[reviewwindow] Warm-start ICA: runica (extended, lrate=1e-4) …\n');
+            new_EEG = pop_runica(EEG_tmp, 'icatype','runica', ...
+                'weights', w0, 'lrate', 1e-4, 'extended', 1, pca_ws{:});
+            method  = 'runica warm-start';
+        catch e_warm
+            fprintf('[reviewwindow] Warm start failed (%s) — falling back to cold start.\n', ...
+                e_warm.message);
+        end
+
+        % If warm start failed, try cold-start chain on the trimmed data
+        if isempty(new_EEG)
+            try
+                new_EEG = pop_runica(EEG_tmp,'icatype','picard','mode','standard',pca_ws{:});
+                method  = 'Picard cold-start';
+            catch
+                try
+                    new_EEG = pop_runica(EEG_tmp,'icatype','binica',pca_ws{:});
+                    method  = 'binica cold-start';
+                catch
+                    try
+                        new_EEG = pop_runica(EEG_tmp,'icatype','runica','extended',1,pca_ws{:});
+                        method  = 'runica cold-start';
+                    catch e_last
+                        warndlg(sprintf('Update ICA failed.\nError: %s', e_last.message), ...
+                            'ICA Error');
+                    end
+                end
+            end
+        end
+
+        set(hrun_ica, 'Enable','on', 'BackgroundColor',[0.13 0.38 0.68]);
+
+        if isempty(new_EEG)
+            set(hrun_ica, 'String','Run ICA');
+            return;
+        end
+
+        fprintf('[reviewwindow] Update ICA complete using %s.\n', method);
+
+        % Copy decomposition back onto the FULL EEG (not the trimmed copy).
+        % Remap icachansind from EEG_tmp indices → original EEG indices.
+        EEG.icaweights = new_EEG.icaweights;
+        EEG.icasphere  = new_EEG.icasphere;
+        EEG.icawinv    = new_EEG.icawinv;
+        if ~isempty(bad_ch) && ~isempty(good_ch)
+            EEG.icachansind = good_ch(new_EEG.icachansind);
+        else
+            EEG.icachansind = new_EEG.icachansind;
+        end
+        try
+            EEG.icaact = (EEG.icaweights * EEG.icasphere) * ...
+                          EEG.data(EEG.icachansind, :);
+        catch e_act
+            fprintf('[reviewwindow] icaact recompute: %s\n', e_act.message);
+        end
+
+        % Tear down stale topo + PSD panels
+        if ~isempty(s.topo_axes)
+            alive = ishandle(s.topo_axes);
+            if any(alive), delete(s.topo_axes(alive)); end
+        end
+        if ~isempty(s.psd_axes)
+            alive = ishandle(s.psd_axes);
+            if any(alive), delete(s.psd_axes(alive)); end
+        end
+
+        s.EEG       = EEG;
+        s.bad_ics   = false(1, size(EEG.icawinv, 2));
+        s.topo_axes = gobjects(1,0);
+        s.psd_axes  = gobjects(1,0);
+        s.topo_N    = 0;
+        set(s.htoggle, 'Enable','on', 'String','Show ICA');
+        setappdata(hfig,'s',s);
+        assignin('base','EEG', EEG);
+        redraw();
+        return;
+        % ================================================================
+    end
+
+    % ================================================================
+    %  COLD START
+    % ================================================================
     set(hrun_ica, 'Enable','off', 'String','Running ICA…');
     drawnow;
+
+    % Build clean input: remove bad channels and bad periods.
+    good_ch_cold = find(~s.bad_chans);
+    bad_ch_cold  = find(s.bad_chans);
+    EEG_ica      = EEG;
+
+    if ~isempty(bad_ch_cold)
+        try
+            EEG_ica = pop_select(EEG_ica, 'nochannel', bad_ch_cold);
+            fprintf('[reviewwindow] Excluded %d bad channel(s) from ICA.\n', numel(bad_ch_cold));
+        catch e_sel
+            fprintf('[reviewwindow] pop_select (cold): %s\n', e_sel.message);
+            good_ch_cold = 1:size(EEG.data,1);
+            EEG_ica      = EEG;
+        end
+    end
+    if ~isempty(s.bad_periods)
+        try
+            EEG_ica = eeg_eegrej(EEG_ica, s.bad_periods);
+        catch e_rej
+            fprintf('[reviewwindow] eeg_eegrej (cold): %s\n', e_rej.message);
+        end
+    end
 
     new_EEG  = [];
     method   = '';
 
-    % --- PCA reduction for high-density arrays ----------------------------
-    % For n > 40 channels: n_pca = 40 + floor((n-40)/2)
-    %   60 ch  → 50 components,  128 ch → 84 components
-    n_ch = size(EEG.data, 1);
+    n_ch = size(EEG_ica.data, 1);
     if n_ch > 40
-        n_pca    = 40 + floor((n_ch - 40) / 2);
+        n_pca    = 40 + round(sqrt(n_ch - 40));
         pca_args = {'pca', n_pca};
         fprintf('[reviewwindow] %d channels → PCA to %d components\n', n_ch, n_pca);
     else
         pca_args = {};
     end
 
-    % --- try binica first -------------------------------------------------
+    % --- try Picard first -------------------------------------------------
     try
-        fprintf('[reviewwindow] Running ICA: binica …\n');
-        new_EEG = pop_runica(EEG, 'icatype','binica', pca_args{:});
-        method  = 'binica';
-    catch e_binica
-        fprintf('[reviewwindow] binica failed (%s), trying runica extended…\n', ...
-            e_binica.message);
-        % --- fall back to runica with extended option --------------------
+        fprintf('[reviewwindow] Running ICA: Picard (standard) …\n');
+        new_EEG = pop_runica(EEG_ica, 'icatype','picard', 'mode','standard', pca_args{:});
+        method  = 'Picard (standard)';
+    catch e_picard
+        fprintf('[reviewwindow] Picard failed (%s), trying binica…\n', e_picard.message);
         try
-            new_EEG = pop_runica(EEG, 'icatype','runica', 'extended',1, pca_args{:});
-            method  = 'runica (extended)';
-        catch e_runica
-            warndlg( ...
-                sprintf('ICA failed with both methods.\nrunica error: %s', ...
-                        e_runica.message), ...
-                'ICA Error');
+            fprintf('[reviewwindow] Running ICA: binica …\n');
+            new_EEG = pop_runica(EEG_ica, 'icatype','binica', pca_args{:});
+            method  = 'binica';
+        catch e_binica
+            fprintf('[reviewwindow] binica failed (%s), trying runica extended…\n', ...
+                e_binica.message);
+            try
+                new_EEG = pop_runica(EEG_ica, 'icatype','runica', 'extended',1, pca_args{:});
+                method  = 'runica (extended)';
+            catch e_runica
+                warndlg( ...
+                    sprintf('ICA failed with all methods.\nLast error: %s', ...
+                            e_runica.message), ...
+                    'ICA Error');
+            end
         end
     end
 
@@ -740,16 +1018,24 @@ function run_ica_cb(~, ~)
 
     fprintf('[reviewwindow] ICA complete using %s.\n', method);
 
-    % Ensure activations are computed
+    % Copy decomposition onto full EEG; remap icachansind to original indices.
+    EEG.icaweights = new_EEG.icaweights;
+    EEG.icasphere  = new_EEG.icasphere;
+    EEG.icawinv    = new_EEG.icawinv;
+    if ~isempty(bad_ch_cold) && ~isempty(good_ch_cold)
+        EEG.icachansind = good_ch_cold(new_EEG.icachansind);
+    else
+        EEG.icachansind = new_EEG.icachansind;
+    end
     try
         new_EEG = eeg_checkset(new_EEG, 'ica');
+    catch, end
+    try
+        EEG.icaact = (EEG.icaweights * EEG.icasphere) * ...
+                      EEG.data(EEG.icachansind, :);
     catch
-        try
-            new_EEG.icaact = (new_EEG.icaweights * new_EEG.icasphere) * ...
-                              new_EEG.data(new_EEG.icachansind, :);
-        catch
-        end
     end
+    new_EEG = EEG;
 
     % Tear down any existing topo + PSD axes (belong to old decomposition)
     if ~isempty(s.topo_axes)
@@ -775,10 +1061,52 @@ function run_ica_cb(~, ~)
     redraw();
 end % run_ica_cb
 
+function chan_page_cb(dir)
+    s = getappdata(hfig, 's');
+    if strcmp(s.mode,'ica'), return; end   % no paging in ICA mode
+    N_total = size(s.EEG.data, 1);
+    s.chan_offset = max(0, min(s.chan_offset + dir*s.chan_page, N_total - 1));
+    setappdata(hfig, 's', s);
+    redraw();
+end % chan_page_cb
+
+function interp_clean_cb(~, ~)
+    s = getappdata(hfig, 's');
+    checked = get(s.hinterp_cb, 'Value');
+    if checked
+        if isempty(s.interp_EEG)
+            % Run InterpolationCleaning once; cache the result for toggling
+            set(s.hinterp_cb, 'Enable','off', 'String','Processing…');
+            drawnow;
+            try
+                s.interp_EEG = InterpolationReplace(s.EEG);
+            catch e
+                warndlg(['InterpolationCleaning failed: ' e.message], 'Cleaning Error');
+                set(s.hinterp_cb, 'Enable','on', 'String','Interp. Cleaning', 'Value',0);
+                setappdata(hfig, 's', s);
+                return;
+            end
+            set(s.hinterp_cb, 'Enable','on', 'String','Interp. Cleaning');
+            if ~isstruct(s.interp_EEG) || ~isfield(s.interp_EEG, 'data')
+                warndlg('InterpolationCleaning did not return a valid EEG struct.', 'Cleaning Error');
+                set(s.hinterp_cb, 'Value', 0);
+                setappdata(hfig, 's', s);
+                return;
+            end
+        end
+        s.show_interp = true;
+    else
+        s.show_interp = false;
+    end
+    setappdata(hfig, 's', s);
+    redraw();
+end % interp_clean_cb
+
 function close_req_cb(~, ~)
-    % Called when the user clicks the window's X button.
-    % Don't delete the figure here — just release uiwait so the
-    % post-wait block can read state and then delete it cleanly.
+    % Stop any pending auto-ICA timer, then release uiwait.
+    % The post-wait block reads state and deletes the figure cleanly.
+    t = timerfind('Tag','reviewwindow_ica_auto');
+    if ~isempty(t), stop(t); delete(t); end
     uiresume(hfig);
 end % close_req_cb
 
